@@ -3,6 +3,8 @@ using PCMonitor.API.Hubs;
 using PCMonitor.Core.Data;
 using PCMonitor.Core.Models;
 using PCMonitor.Core.Services;
+using PCMonitor.Core.Reading;
+using OpenHardwareMonitor.Hardware; // Added for IComputer and Computer
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -46,6 +48,16 @@ var powerConfig = new PowerConfig
 builder.Services.AddSingleton(powerConfig);
 
 // Register services
+// Register OpenHardwareMonitor's Computer as a singleton IComputer
+builder.Services.AddSingleton<IComputer>(serviceProvider =>
+{
+    // This factory allows us to control the instantiation and initial setup if needed,
+    // though SensorReader's constructor now handles setting enabled flags and Open().
+    // If Computer class had complex setup not done by SensorReader, it could go here.
+    // For now, just newing it up is fine as SensorReader configures it.
+    return new Computer(); 
+});
+builder.Services.AddSingleton<ISensorReader, SensorReader>();
 builder.Services.AddSingleton<IHardwareMonitorService, HardwareMonitorService>();
 builder.Services.AddScoped<ISessionService, SessionService>();
 builder.Services.AddScoped<IPowerDataService, PowerDataService>();

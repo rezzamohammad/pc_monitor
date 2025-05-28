@@ -1,9 +1,9 @@
 using Microsoft.AspNetCore.SignalR;
-using PCMonitor.Core.Models;
+// using PCMonitor.Core.Models; // Removed as types are no longer referenced
 
 namespace PCMonitor.API.Hubs;
 
-public class HardwareMonitorHub : Hub
+public class HardwareMonitorHub : Hub<IHardwareMonitorHubClient>
 {
     private readonly ILogger<HardwareMonitorHub> _logger;
 
@@ -25,10 +25,4 @@ public class HardwareMonitorHub : Hub
         await base.OnDisconnectedAsync(exception);
     }
 }
-
-public interface IHardwareMonitorHubClient
-{
-    Task ReceivePowerUpdate(PowerData powerData);
-    Task ReceiveComponentUpdate(List<ComponentData> componentData);
-    Task ReceiveSessionUpdate(Session session);
-}
+// Removed IHardwareMonitorHubClient interface definition

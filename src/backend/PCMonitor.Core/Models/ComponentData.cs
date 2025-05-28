@@ -10,4 +10,9 @@ public class ComponentData
     public double? Utilization { get; set; }
     public double? Temperature { get; set; }
     public double PowerWatts { get; set; }
+    public double? ClockSpeedMhz { get; set; }
+    public double? MemoryUsedMB { get; set; }
+    public double? MemoryTotalMB { get; set; }
+    public double? FanSpeedRPM { get; set; }
+    public double? Voltage { get; set; }
 }
