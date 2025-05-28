@@ -3,45 +3,34 @@ using System.Linq;
 using Microsoft.Extensions.Logging;
 using OpenHardwareMonitor.Hardware;
 using PCMonitor.Core.Models;
+using PCMonitor.Core.Reading; // Added for ISensorReader
 
 namespace PCMonitor.Core.Services;
 
 public class HardwareMonitorService : IHardwareMonitorService
 {
     private readonly ILogger<HardwareMonitorService> _logger;
-    private readonly Computer _computer;
+    private readonly ISensorReader _sensorReader; // Changed from Computer to ISensorReader
     private readonly PowerConfig _powerConfig;
     private double _lastAccumulatedKwh = 0;
     private string _currentSessionId = string.Empty;
 
-    public HardwareMonitorService(ILogger<HardwareMonitorService> logger, PowerConfig powerConfig)
+    public HardwareMonitorService(ILogger<HardwareMonitorService> logger, PowerConfig powerConfig, ISensorReader sensorReader)
     {
         _logger = logger;
         _powerConfig = powerConfig;
+        _sensorReader = sensorReader; // Assign ISensorReader
         
-        // Initialize OpenHardwareMonitor
-        _computer = new Computer
-        {
-            CPUEnabled = true,
-            GPUEnabled = true,
-            RAMEnabled = true,
-            MainboardEnabled = true,
-            HDDEnabled = true,
-            FanControllerEnabled = true
-        };
-        
-        _computer.Open();
         _currentSessionId = Guid.NewGuid().ToString();
         
-        _logger.LogInformation("Hardware monitoring service initialized");
+        _logger.LogInformation("Hardware monitoring service initialized with ISensorReader.");
     }
 
     public PowerData GetCurrentPowerData()
     {
         try
         {
-            // Update all hardware readings
-            _computer.Hardware.ToList().ForEach(hardware => hardware.Update());
+            // Update all hardware readings // REMOVED: _computer.Hardware.ToList().ForEach(hardware => hardware.Update());
             
             // Get CPU utilization
             var cpuUtilization = GetCpuUtilization();
@@ -86,8 +75,7 @@ public class HardwareMonitorService : IHardwareMonitorService
         
         try
         {
-            // Update all hardware readings
-            _computer.Hardware.ToList().ForEach(hardware => hardware.Update());
+            // Update all hardware readings // REMOVED: _computer.Hardware.ToList().ForEach(hardware => hardware.Update());
             
             // Add CPU component
             components.Add(GetCpuComponentData());
@@ -128,48 +116,53 @@ public class HardwareMonitorService : IHardwareMonitorService
 
     public void Dispose()
     {
-        _computer?.Close();
+        // _computer?.Close(); // Removed: _sensorReader's lifetime is managed by DI
+        // The service itself is IDisposable because IHardwareMonitorService is IDisposable.
+        // No other unmanaged resources are directly owned by this service.
     }
 
     #region Private Methods
 
     private double GetCpuUtilization()
     {
-        var cpuHardware = _computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.CPU);
-        if (cpuHardware == null)
-            return 0;
-        
-        var utilizationSensors = cpuHardware.Sensors.Where(s => s.SensorType == SensorType.Load && s.Name.Contains("CPU Total"));
-        if (!utilizationSensors.Any())
-            return 0;
-        
-        return utilizationSensors.Average(s => s.Value ?? 0);
+        var cpus = _sensorReader.GetHardware(HardwareType.CPU).ToList();
+        if (cpus.Any())
+        {
+            var cpuInfo = cpus.First();
+            return _sensorReader.GetSensorValue(cpuInfo.Identifier, SensorType.Load, "CPU Total") ?? 0;
+        }
+        _logger.LogWarning("No CPU hardware found by SensorReader for GetCpuUtilization.");
+        return 0;
     }
 
     private double GetGpuUtilization()
     {
-        var gpuHardware = _computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.GpuNvidia || h.HardwareType == HardwareType.GpuAti);
-        if (gpuHardware == null)
-            return 0;
-        
-        var utilizationSensors = gpuHardware.Sensors.Where(s => s.SensorType == SensorType.Load && s.Name.Contains("GPU Core"));
-        if (!utilizationSensors.Any())
-            return 0;
-        
-        return utilizationSensors.Average(s => s.Value ?? 0);
+        var gpus = _sensorReader.GetHardware(HardwareType.GpuNvidia)
+                                .Concat(_sensorReader.GetHardware(HardwareType.GpuAti))
+                                .ToList();
+        if (gpus.Any())
+        {
+            var gpuInfo = gpus.First(); // Simplification: uses the first GPU.
+            return _sensorReader.GetSensorValue(gpuInfo.Identifier, SensorType.Load, "GPU Core") ?? 0;
+        }
+        _logger.LogWarning("No GPU hardware found by SensorReader for GetGpuUtilization.");
+        return 0;
     }
 
     private double GetMemoryUtilization()
     {
-        var ramHardware = _computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.RAM);
-        if (ramHardware == null)
-            return 0;
-        
-        var utilizationSensors = ramHardware.Sensors.Where(s => s.SensorType == SensorType.Load);
-        if (!utilizationSensors.Any())
-            return 0;
-        
-        return utilizationSensors.Average(s => s.Value ?? 0);
+        var rams = _sensorReader.GetHardware(HardwareType.RAM).ToList();
+        if (rams.Any())
+        {
+            var ramInfo = rams.First();
+            // Assuming "Memory" is the correct sensor name for overall RAM load.
+            // In OHM, this is often under "Memory" sensor type, with a name like "Memory Used" or "Memory Load".
+            // The direct sensor name for load might be "Memory" or specific like "Memory Load".
+            // Let's stick to "Memory" as a general load sensor name, if not found, GetSensorValue returns null -> 0.
+            return _sensorReader.GetSensorValue(ramInfo.Identifier, SensorType.Load, "Memory") ?? 0;
+        }
+        _logger.LogWarning("No RAM hardware found by SensorReader for GetMemoryUtilization.");
+        return 0;
     }
 
     private double CalculateTotalPower(double cpuUtilization, double gpuUtilization)
@@ -183,120 +176,151 @@ public class HardwareMonitorService : IHardwareMonitorService
 
     private double GetCpuPower(double cpuUtilization)
     {
-        // Try to get direct power reading from CPU sensors
-        var cpuHardware = _computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.CPU);
-        if (cpuHardware != null)
+        var cpuInfo = _sensorReader.GetHardware(HardwareType.CPU).FirstOrDefault();
+        if (cpuInfo != null)
         {
-            var powerSensors = cpuHardware.Sensors.Where(s => s.SensorType == SensorType.Power && s.Name.Contains("Package"));
-            if (powerSensors.Any())
+            var directPower = _sensorReader.GetSensorValue(cpuInfo.Identifier, SensorType.Power, "Package");
+            if (directPower.HasValue)
             {
-                return powerSensors.Average(s => s.Value ?? 0);
+                return directPower.Value;
             }
         }
-        
-        // If no direct reading, estimate based on TDP and utilization
+        // Fallback to TDP estimation
         return _powerConfig.PowerModel.CpuTdpWatts * (0.3 + (0.7 * cpuUtilization / 100));
     }
 
     private double GetGpuPower(double gpuUtilization)
     {
-        // Try to get direct power reading from GPU sensors
-        var gpuHardware = _computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.GpuNvidia || h.HardwareType == HardwareType.GpuAti);
-        if (gpuHardware != null)
+        var gpuInfo = _sensorReader.GetHardware(HardwareType.GpuNvidia)
+                                .Concat(_sensorReader.GetHardware(HardwareType.GpuAti))
+                                .FirstOrDefault();
+        if (gpuInfo != null)
         {
-            var powerSensors = gpuHardware.Sensors.Where(s => s.SensorType == SensorType.Power);
-            if (powerSensors.Any())
+            // Using "Package" for GPU power as it's common, though original code searched any power sensor.
+            // If a more specific or different named sensor is common, this pattern might need adjustment.
+            var directPower = _sensorReader.GetSensorValue(gpuInfo.Identifier, SensorType.Power, "Package");
+            if (directPower.HasValue)
             {
-                return powerSensors.Average(s => s.Value ?? 0);
+                return directPower.Value;
             }
         }
-        
-        // If no direct reading, estimate based on TDP and utilization
+        // Fallback to TDP estimation
         return _powerConfig.PowerModel.GpuTdpWatts * (0.2 + (0.8 * gpuUtilization / 100));
     }
 
     private ComponentData GetCpuComponentData()
     {
-        var cpuHardware = _computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.CPU);
+        var cpuInfo = _sensorReader.GetHardware(HardwareType.CPU).FirstOrDefault();
+        if (cpuInfo == null)
+        {
+            _logger.LogWarning("CPU hardware not found via SensorReader.");
+            return new ComponentData { 
+                Id = "cpu", Name = "CPU", Type = "processor", Model = "Unknown CPU", 
+                TdpWatts = _powerConfig.PowerModel.CpuTdpWatts, Utilization = 0, 
+                Temperature = null, PowerWatts = _powerConfig.PowerModel.CpuTdpWatts * 0.3, // idle estimate
+                ClockSpeedMhz = null 
+            };
+        }
         
-        var model = cpuHardware?.Name ?? "Unknown CPU";
-        var utilization = GetCpuUtilization();
-        var temperature = GetSensorValue(cpuHardware, SensorType.Temperature, "CPU Package");
-        var power = GetCpuPower(utilization);
+        var utilization = GetCpuUtilization(); // Already uses SensorReader
+        // Log if GetCpuUtilization returned 0, potentially indicating a missing "CPU Total" sensor
+        if (utilization == 0)
+             _logger.LogWarning($"CPU Utilization is 0. Sensor 'CPU Total' might be missing or unreadable on '{cpuInfo.Name}'.");
+
+        var temperature = _sensorReader.GetSensorValue(cpuInfo.Identifier, SensorType.Temperature, "CPU Package");
+        var power = GetCpuPower(utilization); // Already uses SensorReader for direct power
         
+        var coreClocks = _sensorReader.GetSensorReadings(cpuInfo.Identifier, SensorType.Clock, "CPU Core").ToList();
+        double? clockSpeed = coreClocks.Any(c => c.Value.HasValue) ? coreClocks.Where(c => c.Value.HasValue).Average(c => c.Value.Value) : null;
+
         return new ComponentData
         {
             Id = "cpu",
             Name = "CPU",
             Type = "processor",
-            Model = model,
+            Model = cpuInfo.Name,
             TdpWatts = _powerConfig.PowerModel.CpuTdpWatts,
             Utilization = utilization,
             Temperature = temperature,
-            PowerWatts = power
+            PowerWatts = power,
+            ClockSpeedMhz = clockSpeed
         };
     }
 
     private List<ComponentData> GetGpuComponentData()
     {
         var gpuComponents = new List<ComponentData>();
-        var gpuHardware = _computer.Hardware.Where(h => h.HardwareType == HardwareType.GpuNvidia || h.HardwareType == HardwareType.GpuAti);
+        var gpuHardwareInfo = _sensorReader.GetHardware(HardwareType.GpuNvidia)
+                                     .Concat(_sensorReader.GetHardware(HardwareType.GpuAti))
+                                     .ToList();
         
-        int gpuIndex = 0;
-        foreach (var gpu in gpuHardware)
+        if (!gpuHardwareInfo.Any())
         {
-            var model = gpu.Name ?? "Unknown GPU";
-            var utilization = GetSensorValue(gpu, SensorType.Load, "GPU Core");
-            var temperature = GetSensorValue(gpu, SensorType.Temperature, "GPU Core");
-            var power = GetSensorValue(gpu, SensorType.Power, "GPU Package") ?? 
-                        (_powerConfig.PowerModel.GpuTdpWatts * (0.2 + (0.8 * (utilization ?? 0) / 100)));
+            _logger.LogWarning("No GPU hardware found via SensorReader. Adding placeholder.");
+            gpuComponents.Add(new ComponentData
+            {
+                Id = "gpu", Name = "GPU", Type = "graphics", Model = "Integrated/Unknown",
+                TdpWatts = _powerConfig.PowerModel.GpuTdpWatts, Utilization = 0, Temperature = null, PowerWatts = 0
+            });
+            return gpuComponents;
+        }
+
+        int gpuIndex = 0;
+        foreach (var gpuInfo in gpuHardwareInfo)
+        {
+            var utilization = _sensorReader.GetSensorValue(gpuInfo.Identifier, SensorType.Load, "GPU Core");
+            var temperature = _sensorReader.GetSensorValue(gpuInfo.Identifier, SensorType.Temperature, "GPU Core");
+            var directPower = _sensorReader.GetSensorValue(gpuInfo.Identifier, SensorType.Power, "GPU Package");
+            var power = directPower ?? (_powerConfig.PowerModel.GpuTdpWatts * (0.2 + (0.8 * (utilization ?? 0) / 100)));
+            var clockSpeed = _sensorReader.GetSensorValue(gpuInfo.Identifier, SensorType.Clock, "GPU Core");
+            var memoryUsed = _sensorReader.GetSensorValue(gpuInfo.Identifier, SensorType.SmallData, "GPU Memory Used");
+            var memoryTotal = _sensorReader.GetSensorValue(gpuInfo.Identifier, SensorType.SmallData, "GPU Memory Total");
             
             gpuComponents.Add(new ComponentData
             {
                 Id = $"gpu{gpuIndex}",
                 Name = $"GPU {(gpuIndex > 0 ? gpuIndex.ToString() : "")}",
                 Type = "graphics",
-                Model = model,
+                Model = gpuInfo.Name,
                 TdpWatts = _powerConfig.PowerModel.GpuTdpWatts,
                 Utilization = utilization,
                 Temperature = temperature,
-                PowerWatts = power
+                PowerWatts = power,
+                ClockSpeedMhz = clockSpeed,
+                MemoryUsedMB = memoryUsed,
+                MemoryTotalMB = memoryTotal
             });
-            
             gpuIndex++;
         }
-        
-        // If no GPU was found, add a placeholder
-        if (gpuComponents.Count == 0)
-        {
-            gpuComponents.Add(new ComponentData
-            {
-                Id = "gpu",
-                Name = "GPU",
-                Type = "graphics",
-                Model = "Integrated/Unknown",
-                TdpWatts = _powerConfig.PowerModel.GpuTdpWatts,
-                Utilization = 0,
-                Temperature = null,
-                PowerWatts = 0
-            });
-        }
-        
         return gpuComponents;
     }
 
     private ComponentData GetMemoryComponentData()
     {
-        var ramHardware = _computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.RAM);
+        var ramInfo = _sensorReader.GetHardware(HardwareType.RAM).FirstOrDefault();
+        var utilization = GetMemoryUtilization(); // Already uses SensorReader
+
+        if (ramInfo == null)
+        {
+            _logger.LogWarning("RAM hardware not found via SensorReader.");
+            return new ComponentData { 
+                Id = "ram", Name = "Memory", Type = "memory", Model = "Unknown Memory", 
+                TdpWatts = 10, Utilization = utilization, Temperature = null, 
+                PowerWatts = 5 + (5 * utilization / 100) 
+            };
+        }
         
-        var utilization = GetMemoryUtilization();
-        var usedMemory = GetSensorValue(ramHardware, SensorType.Data, "Used Memory");
-        var availableMemory = GetSensorValue(ramHardware, SensorType.Data, "Available Memory");
+        var usedMemory = _sensorReader.GetSensorValue(ramInfo.Identifier, SensorType.Data, "Used Memory");
+        var availableMemory = _sensorReader.GetSensorValue(ramInfo.Identifier, SensorType.Data, "Available Memory");
         var totalMemory = (usedMemory ?? 0) + (availableMemory ?? 0);
         
         var memoryModel = $"{totalMemory:F1}GB";
-        if (string.IsNullOrEmpty(memoryModel))
-            memoryModel = "Unknown Memory";
+        if (totalMemory == 0)
+        {
+             memoryModel = (usedMemory.HasValue || availableMemory.HasValue) 
+                ? $"Used: {usedMemory ?? 0:F1}GB, Avail: {availableMemory ?? 0:F1}GB" 
+                : "Unknown Memory";
+        }
         
         return new ComponentData
         {
@@ -313,37 +337,61 @@ public class HardwareMonitorService : IHardwareMonitorService
 
     private ComponentData GetMotherboardComponentData()
     {
-        var mainboardHardware = _computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.Mainboard);
+        var mbInfo = _sensorReader.GetMainboard();
+        if (mbInfo == null)
+        {
+            // GetMainboard in SensorReader already logs if mainboard itself is not found.
+            // This service-level log indicates it wasn't available for component data creation.
+            _logger.LogWarning("Motherboard hardware info not available from SensorReader for component data.");
+            return new ComponentData {
+                Id = "mobo", Name = "Motherboard", Type = "motherboard", Model = "Unknown Motherboard",
+                TdpWatts = 25, Utilization = null, Temperature = null, PowerWatts = 15,
+                FanSpeedRPM = null, Voltage = null
+            };
+        }
         
-        var model = mainboardHardware?.Name ?? "Unknown Motherboard";
-        var temperature = GetSensorValue(mainboardHardware, SensorType.Temperature, "Temperature");
+        var temperature = _sensorReader.GetSensorValue(mbInfo.Identifier, SensorType.Temperature, "Temperature");
+        var fanSpeed = _sensorReader.GetSensorValue(mbInfo.Identifier, SensorType.Fan, "Fan");
+        var voltage = _sensorReader.GetSensorValue(mbInfo.Identifier, SensorType.Voltage, "CPU VCore");
         
         return new ComponentData
         {
             Id = "mobo",
             Name = "Motherboard",
             Type = "motherboard",
-            Model = model,
+            Model = mbInfo.Name,
             TdpWatts = 25, // Default estimate for motherboard
             Utilization = null,
             Temperature = temperature,
-            PowerWatts = 15 // Estimate motherboard power usage
+            PowerWatts = 15, // Estimate motherboard power usage
+            FanSpeedRPM = fanSpeed,
+            Voltage = voltage
         };
     }
 
     private List<ComponentData> GetStorageComponentData()
     {
         var storageComponents = new List<ComponentData>();
-        var storageHardware = _computer.Hardware.Where(h => h.HardwareType == HardwareType.HDD);
+        var storageHardwareInfo = _sensorReader.GetHardware(HardwareType.HDD).ToList();
         
-        int storageIndex = 0;
-        foreach (var storage in storageHardware)
+        if (!storageHardwareInfo.Any())
         {
-            var model = storage.Name ?? "Unknown Storage";
-            var temperature = GetSensorValue(storage, SensorType.Temperature, "Temperature");
-            var utilization = GetSensorValue(storage, SensorType.Load, "Used Space");
+            _logger.LogWarning("No storage hardware found via SensorReader. Adding placeholder.");
+            storageComponents.Add(new ComponentData {
+                Id = "storage", Name = "Storage", Type = "storage", Model = "Unknown Storage",
+                TdpWatts = 5, Utilization = null, Temperature = null, PowerWatts = 3
+            });
+            return storageComponents;
+        }
+
+        int storageIndex = 0;
+        foreach (var storageInfo in storageHardwareInfo)
+        {
+            var model = storageInfo.Name;
+            var temperature = _sensorReader.GetSensorValue(storageInfo.Identifier, SensorType.Temperature, "Temperature");
+            var utilization = _sensorReader.GetSensorValue(storageInfo.Identifier, SensorType.Load, "Used Space");
             
-            bool isSsd = model.Contains("SSD") || model.Contains("NVMe");
+            bool isSsd = model.Contains("SSD", StringComparison.OrdinalIgnoreCase) || model.Contains("NVMe", StringComparison.OrdinalIgnoreCase);
             
             storageComponents.Add(new ComponentData
             {
@@ -356,63 +404,11 @@ public class HardwareMonitorService : IHardwareMonitorService
                 Temperature = temperature,
                 PowerWatts = isSsd ? 2 : 4 // Estimate storage power usage
             });
-            
             storageIndex++;
         }
-        
-        // If no storage was found, add a placeholder
-        if (storageComponents.Count == 0)
-        {
-            storageComponents.Add(new ComponentData
-            {
-                Id = "storage",
-                Name = "Storage",
-                Type = "storage",
-                Model = "Unknown Storage",
-                TdpWatts = 5,
-                Utilization = null,
-                Temperature = null,
-                PowerWatts = 3
-            });
-        }
-        
         return storageComponents;
     }
 
-    private double? GetSensorValue(IHardware? hardware, SensorType sensorType, string nameContains)
-    {
-        if (hardware == null)
-            return null;
-        
-        hardware.Update();
-        
-        var sensors = hardware.Sensors
-            .Where(s => s.SensorType == sensorType && s.Name.Contains(nameContains, StringComparison.OrdinalIgnoreCase));
-        
-        if (!sensors.Any())
-            return null;
-        
-        return sensors.Average(s => s.Value);
-    }
-
-    private double? GetSensorValue(IEnumerable<IHardware> hardware, SensorType sensorType, string nameContains)
-    {
-        foreach (var h in hardware)
-        {
-            h.Update();
-            
-            var value = GetSensorValue(h, sensorType, nameContains);
-            if (value.HasValue)
-                return value;
-            
-            // Check sub-hardware
-            var subValue = GetSensorValue(h.SubHardware, sensorType, nameContains);
-            if (subValue.HasValue)
-                return subValue;
-        }
-        
-        return null;
-    }
-
+    // Old GetSensorValue methods are removed as per instructions.
     #endregion
 }
